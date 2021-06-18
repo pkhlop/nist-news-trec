@@ -1,0 +1,782 @@
+Index: x-pack/plugin/vectors/src/main/java/org/elasticsearch/xpack/vectors/query/ScoreScriptUtils.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/x-pack/plugin/vectors/src/main/java/org/elasticsearch/xpack/vectors/query/ScoreScriptUtils.java b/x-pack/plugin/vectors/src/main/java/org/elasticsearch/xpack/vectors/query/ScoreScriptUtils.java
+--- a/x-pack/plugin/vectors/src/main/java/org/elasticsearch/xpack/vectors/query/ScoreScriptUtils.java	(revision 9c2c238baac2303c22632e0a9327a042ef0e9a82)
++++ b/x-pack/plugin/vectors/src/main/java/org/elasticsearch/xpack/vectors/query/ScoreScriptUtils.java	(revision e33e34b8ddbeb8c95d9a1be92553e82eb8caaa7a)
+@@ -50,8 +50,8 @@
+         /**
+          * Constructs a dense vector function.
+          *
+-         * @param scoreScript The script in which this function was referenced.
+-         * @param queryVector The query vector.
++         * @param scoreScript    The script in which this function was referenced.
++         * @param queryVector    The query vector.
+          * @param normalizeQuery Whether the provided query should be normalized to unit length.
+          */
+         public DenseVectorFunction(ScoreScript scoreScript,
+@@ -198,6 +198,590 @@
+         }
+     }
+ 
++    // Calculate cosine similarity between a query's dense vector and documents' dense vectors
++    public static final class JaccardDistance extends DenseVectorFunction {
++
++        public JaccardDistance(ScoreScript scoreScript, List<Number> queryVector, Object field) {
++            super(scoreScript, queryVector, field, false);
++        }
++
++        public double jaccardDistance() {
++            BytesRef vector = getEncodedVector();
++            ByteBuffer byteBuffer = ByteBuffer.wrap(vector.bytes, vector.offset, vector.length);
++            double nom = 0.0f;
++            double denom = 0.0f;
++            for (float queryValue : queryVector) {
++                float yi = byteBuffer.getFloat();
++//                if (yi < 0 || queryValue < 0) {
++//                    throw new IllegalArgumentException("query vector has negative elements");
++//                }
++                nom += Math.min(queryValue + 1, yi + 1);
++                denom += Math.max(queryValue + 1, yi + 1);
++            }
++            return nom / denom;
++        }
++
++    }
++
++    public static final class JaccardDistance2 extends DenseVectorFunction {
++
++        public JaccardDistance2(ScoreScript scoreScript, List<Number> queryVector, Object field) {
++            super(scoreScript, queryVector, field, false);
++        }
++
++        public double jaccardDistance2() {
++            BytesRef vector = getEncodedVector();
++            ByteBuffer byteBuffer = ByteBuffer.wrap(vector.bytes, vector.offset, vector.length);
++            double nom = 0.0f;
++            double denom = 0.0f;
++            for (float queryValue : queryVector) {
++                float yi = Math.abs(byteBuffer.getFloat());
++                float aq = Math.abs(queryValue);
++//                if (yi < 0 || queryValue < 0) {
++//                    throw new IllegalArgumentException("query vector has negative elements");
++//                }
++                nom += Math.min(aq, yi);
++                denom += Math.max(aq, yi);
++            }
++            return nom / denom;
++        }
++
++    }
++
++
++    public static final class CustomDistance extends DenseVectorFunction {
++
++        public static final int SCALE_FACTOR = 500;
++        final String functionName;
++
++        public CustomDistance(ScoreScript scoreScript, List<Number> queryVector, Object field, String functionName) {
++            super(scoreScript, queryVector, field, false);
++            this.functionName = functionName;
++        }
++
++        public double customDistance() {
++            double res = _customDistance();
++            return Math.abs(res);
++        }
++
++        private double _customDistance() {
++            BytesRef vector = getEncodedVector();
++            ByteBuffer byteBuffer = ByteBuffer.wrap(vector.bytes, vector.offset, vector.length);
++            String[] split = functionName.split(":");
++            double sum = 0.0f;
++            double nom = 0.0f;
++            double denom = 0.0f;
++            int dims = queryVector.length;
++            switch (split[0]) {
++
++                // Table 1
++                case "001d":// 1. Euclidean L2
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        sum += Math.pow(pi - qi, 2);
++                    }
++                    return Math.sqrt(sum);
++                case "002d":// 2. City block L1
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        sum += Math.abs(pi - qi);
++                    }
++                    return sum;
++                case "003d":// 3. Minkowski Lp
++                    double p;
++                    try {
++                        p = Double.parseDouble(split[1]);
++                    } catch (Exception e) {
++                        throw new IllegalArgumentException("Provide proper power 003d:6", e);
++                    }
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        sum += Math.pow(Math.abs(pi - qi), p);
++                    }
++                    return Math.pow(sum, 1 / p);
++                case "004d":// 4. Chebyshev L∞
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        sum = Math.max(Math.abs(pi - qi), sum);
++                    }
++                    return sum;
++
++                // Table 2
++                case "005d":// 5. Sørensen
++                case "017d":// 13. 1 - 016
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        nom += Math.abs(pi - qi);
++                        denom += pi + qi;
++                    }
++                    sum = nom / denom;
++                    return sum;
++                case "006d":// 6. Gower already normalized
++                case "007d":
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        sum += Math.abs(pi - qi);
++                    }
++                    sum = sum / dims;
++                    return sum;
++                case "008d":// 7. Soergel
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        nom += Math.abs(pi - qi);
++                        denom += Math.max(pi, qi);
++                    }
++                    sum = nom / denom;
++                    return sum;
++                case "009d":// 8. Kulczynski
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        nom += Math.abs(pi - qi);
++                        denom += Math.min(pi, qi);
++                    }
++                    sum = nom / denom;
++                    return sum;
++                case "010d":// 9. Canberra
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        sum += Math.abs(pi - qi) / (pi + qi);
++                    }
++                    return sum;
++                case "011d":// 10. Lorentzian
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        sum += Math.log(1 + Math.abs(pi - qi));
++                    }
++                    return sum;
++
++                // Table 3
++                case "012s":// 11. Intersection
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        sum += Math.min(pi, qi);
++                    }
++                    sum = 1 / sum; // convert similarity to distance
++                    return sum;
++                case "013d":// 11. 1-012
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        sum += Math.abs(pi - qi);
++                    }
++                    sum = sum / 2;
++                    return sum;
++                case "014d":// 12. Wave Hedges
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        sum += 1 - Math.min(pi, qi) / Math.max(pi, qi);
++                    }
++                    return sum;
++                case "015d":// 12. Wave Hedges
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        sum += Math.abs(pi - qi) / Math.max(pi, qi);
++                    }
++                    return sum;
++                case "016s":// 13. Czekanowski
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        nom += Math.min(pi, qi);
++                        denom += pi + qi;
++                    }
++                    sum = 2 * nom / denom;
++                    sum = 1 / sum; // convert similarity to distance
++                    return sum;
++                case "018s":// 14. Motyka
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        nom += Math.min(pi, qi);
++                        denom += pi + qi;
++                    }
++                    sum = nom / denom;
++                    sum = 1 / sum; // convert similarity to distance
++                    return sum;
++                case "019d":// 14. 1-018
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        nom += Math.max(pi, qi);
++                        denom += pi + qi;
++                    }
++                    sum = nom / denom;
++                    return sum;
++                case "020s":// 15. Kulczynski
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        nom += Math.min(pi, qi);
++                        denom += Math.abs(pi - qi);
++                    }
++                    sum = nom / denom;
++                    sum = 1 / sum; // convert similarity to distance
++                    return sum;
++                case "021s":// 16. Ruzicka
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        nom += Math.min(pi, qi);
++                        denom += Math.max(pi, qi);
++                    }
++                    sum = nom / denom;
++                    sum = 1 / sum; // convert similarity to distance
++                    return sum;
++                case "022d":// 17. Tanimoto
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        nom += pi + qi - 2 * Math.min(pi, qi);
++                        denom += pi + qi - Math.min(pi, qi);
++                    }
++                    sum = nom / denom;
++                    return sum;
++                case "023d":// 17. Tanimoto
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        nom += Math.max(pi, qi) - Math.min(pi, qi);
++                        denom += Math.max(pi, qi);
++                    }
++                    sum = nom / denom;
++                    return sum;
++
++                // Table 4
++                case "024s":// 18. Inner Product
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        sum += pi * qi;
++                    }
++                    sum = 1 / sum; // convert similarity to distance
++                    return sum;
++                case "025s":// 19. Harmonic mean
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        sum += 2 * (pi * qi) / (pi + qi);
++                    }
++                    sum = 1 / sum; // convert similarity to distance
++                    return sum;
++                case "026s":// 20. Cosine
++                    double denom26_1 = 0.0;
++                    double denom26_2 = 0.0;
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        nom += pi * qi;
++                        denom26_1 += pi * pi;
++                        denom26_2 += qi * qi;
++                    }
++                    sum = nom / (Math.sqrt(denom26_1) + Math.sqrt(denom26_2));
++                    sum = 1 / sum; // convert similarity to distance
++                    return sum;
++                case "027s":// 21. Kumar-Hassebrook (PCE)
++                case "028s":// 22. Jaccard
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        nom += pi * qi;
++                        denom += pi * pi + qi * qi - pi * qi;
++                    }
++                    sum = nom / denom;
++                    sum = 1 / sum; // convert similarity to distance
++                    return sum;
++                case "029d":// 22. Jaccard
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        nom += (pi - qi) * (pi - qi);
++                        denom += pi * pi + qi * qi - pi * qi;
++                    }
++                    sum = nom / denom;
++                    return sum;
++                case "030s":// 23. Dice
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        nom += 2 * pi * qi;
++                        denom += pi * pi + qi * qi;
++                    }
++                    sum = nom / denom;
++                    sum = 1 / sum; // convert similarity to distance
++                    return sum;
++                case "031s":// 23. Dice
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        nom += (pi - qi) * (pi - qi);
++                        denom += pi * pi + qi * qi;
++                    }
++                    sum = nom / denom;
++                    sum = 1 / sum; // convert similarity to distance
++                    return sum;
++
++                // Table 5
++                case "032s":// 24. Fidelity
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        // Scale to prevent NaN
++                        pi += SCALE_FACTOR;
++                        qi += SCALE_FACTOR;
++                        sum += Math.sqrt(pi * qi);
++                    }
++                    sum = 1 / sum; // convert similarity to distance
++                    return sum;
++                case "033d":// 25. Bhattacharyya
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        // Scale to prevent NaN
++                        pi += SCALE_FACTOR;
++                        qi += SCALE_FACTOR;
++                        sum += Math.sqrt(pi * qi);
++                    }
++                    sum = -Math.log(sum);
++                    return sum;
++                case "034d":// 26. Hellinger
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        // Scale to prevent NaN
++                        pi += SCALE_FACTOR;
++                        qi += SCALE_FACTOR;
++                        sum += Math.pow(Math.sqrt(pi) - Math.sqrt(qi), 2);
++                    }
++                    sum = Math.sqrt(2 * sum);
++                    return sum;
++                case "035d":// 26. Hellinger
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        // Scale to prevent NaN
++                        pi += SCALE_FACTOR;
++                        qi += SCALE_FACTOR;
++                        sum += Math.sqrt(pi * qi);
++                    }
++                    sum = 2 * Math.sqrt(SCALE_FACTOR * SCALE_FACTOR * dims - sum);
++                    return sum;
++                case "036d":// 26. Matusita
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        // Scale to prevent NaN
++                        pi += SCALE_FACTOR;
++                        qi += SCALE_FACTOR;
++                        sum += Math.pow(Math.sqrt(pi) - Math.sqrt(qi), 2);
++                    }
++                    sum = Math.sqrt(sum);
++                    return sum;
++                case "037d":// 26. Matusita
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        // Scale to prevent NaN
++                        pi += SCALE_FACTOR;
++                        qi += SCALE_FACTOR;
++                        sum += Math.sqrt(pi * qi);
++                    }
++                    sum = Math.sqrt(2 * SCALE_FACTOR * SCALE_FACTOR * dims - sum);
++                    return sum;
++                case "038d":// 28. Squared-chord
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        // Scale to prevent NaN
++                        pi += SCALE_FACTOR;
++                        qi += SCALE_FACTOR;
++                        sum += Math.pow(Math.sqrt(pi) - Math.sqrt(qi), 2);
++                    }
++                    return sum;
++                case "039s":// 28. Squared-chord
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        // Scale to prevent NaN
++                        pi += SCALE_FACTOR;
++                        qi += SCALE_FACTOR;
++                        sum += Math.sqrt(pi * qi);
++                    }
++                    sum = 2 * sum - 1;
++                    sum = 1 / sum; // convert similarity to distance
++                    return sum;
++
++                // Table 6
++                case "040d":// 29. Squared Euclidian
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        sum += Math.pow(pi - qi, 2);
++                    }
++                    return sum;
++                case "041d":// 30. Pearson χ²
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        sum += Math.pow(pi - qi, 2) / qi;
++                    }
++                    return sum;
++                case "042d":// 31. Neyman χ²
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        sum += Math.pow(pi - qi, 2) / pi;
++                    }
++                    return sum;
++                case "043d":// 32. Squared χ²
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        sum += Math.pow(pi - qi, 2) / (pi + qi);
++                    }
++                    return sum;
++                case "044d":// 33. Probabilistic Symmetric χ²
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        sum += Math.pow(pi - qi, 2) / (pi + qi);
++                    }
++                    sum = 2 * sum;
++                    return sum;
++                case "045d":// 34. Divergence
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        sum += Math.pow(pi - qi, 2) / Math.pow(pi + qi, 2);
++                    }
++                    sum = 2 * sum;
++                    return sum;
++                case "046d":// 35. Clark
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        sum += Math.pow(Math.abs(pi - qi) / (pi + qi), 2);
++                    }
++                    sum = Math.sqrt(sum);
++                    return sum;
++                case "047d":// 36. Additive Symmetric χ²
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        sum += Math.pow(pi - qi, 2) * (pi + qi) / (pi * qi);
++                    }
++                    return sum;
++
++                // Table 7
++                case "048d":// 37. Kullback-Leibler
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        // Scale to prevent NaN
++                        pi += SCALE_FACTOR;
++                        qi += SCALE_FACTOR;
++                        sum += pi * Math.log(pi / qi);
++                    }
++                    return sum;
++                case "049d":// 38. Jeffreys
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        // Scale to prevent NaN
++                        pi += SCALE_FACTOR;
++                        qi += SCALE_FACTOR;
++                        sum += (pi - qi) * Math.log(pi / qi);
++                    }
++                    return sum;
++                case "050d":// 39. K divergence
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        // Scale to prevent NaN
++                        pi += SCALE_FACTOR;
++                        qi += SCALE_FACTOR;
++                        sum += pi * Math.log(2 * pi / (pi + qi));
++                    }
++                    return sum;
++                case "051d":// 40. Topsøe
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        // Scale to prevent NaN
++                        pi += SCALE_FACTOR;
++                        qi += SCALE_FACTOR;
++                        sum += pi * Math.log(2 * pi / (pi + qi)) + qi * Math.log(2 * qi / (pi + qi));
++                    }
++                    return sum;
++                case "052d":// 41. Jensen-Shannon (same as 1/2 051d)
++                    double sum_052d_1 = 0.0;
++                    double sum_052d_2 = 0.0;
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        // Scale to prevent NaN
++                        pi += SCALE_FACTOR;
++                        qi += SCALE_FACTOR;
++                        sum_052d_1 += pi * Math.log(2 * pi / (pi + qi));
++                        sum_052d_2 = qi * Math.log(2 * qi / (pi + qi));
++                    }
++                    sum = (sum_052d_1 + sum_052d_2) / 2;
++                    return sum;
++                case "053d":// 42. Jensen difference
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        // Scale to prevent NaN
++                        pi += SCALE_FACTOR;
++                        qi += SCALE_FACTOR;
++                        sum += (pi * Math.log(pi) + qi * Math.log(qi)) / 2 - (pi + qi) / 2 * Math.log((pi + qi) / 2);
++                    }
++                    return sum;
++
++                // Table 8
++                case "054d":// 43. Taneja
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        // Scale to prevent NaN
++                        pi += SCALE_FACTOR;
++                        qi += SCALE_FACTOR;
++                        sum += (pi + qi) / 2 * Math.log((pi + qi) / (2 * Math.sqrt(pi * qi)));
++                    }
++                    return sum;
++                case "055d":// 44. Kumar-Johnson
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        // Scale to prevent NaN
++                        pi += SCALE_FACTOR;
++                        qi += SCALE_FACTOR;
++                        sum += Math.pow(pi * pi - qi * qi, 2) / (2 * Math.pow(pi * qi, 3.0 / 2.0));
++                    }
++                    return sum;
++                case "056d":// 45. Avg (L1, L∞)
++                    double maxm = 0.0;
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        sum += Math.abs(pi - qi);
++                        maxm = Math.max(Math.abs(pi - qi), maxm);
++                    }
++                    sum = (sum + maxm) / 2;
++                    return sum;
++
++                // Table
++                case "060d":// Vicis-Wave Hedges
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        sum += Math.abs(pi - qi) / Math.min(pi, qi);
++                    }
++                    return sum;
++                case "061d":// Vicis-Symmetric χ²
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        sum += Math.pow(pi - qi, 2) / Math.pow(Math.min(pi, qi), 2);
++                    }
++                    return sum;
++                case "062d":// Vicis-Symmetric χ²
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        sum += Math.pow(pi - qi, 2) / Math.min(pi, qi);
++                    }
++                    return sum;
++                case "063d":// Vicis-Symmetric χ²
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        sum += Math.pow(pi - qi, 2) / Math.max(pi, qi);
++                    }
++                    return sum;
++                case "064d":// max-Symmetric χ²
++                    double sum_064d_1 = 0.0;
++                    double sum_064d_2 = 0.0;
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        sum_064d_1 += Math.pow(pi - qi, 2) / pi;
++                        sum_064d_2 += Math.pow(pi - qi, 2) / qi;
++                    }
++                    sum = Math.max(sum_064d_1, sum_064d_2);
++                    return sum;
++                case "065d":// min-Symmetric χ²
++                    double sum_065d_1 = 0.0;
++                    double sum_065d_2 = 0.0;
++                    for (float qi : queryVector) {
++                        float pi = byteBuffer.getFloat();
++                        sum_065d_1 += Math.pow(pi - qi, 2) / pi;
++                        sum_065d_2 += Math.pow(pi - qi, 2) / qi;
++                    }
++                    sum = Math.min(sum_065d_1, sum_065d_2);
++                    return sum;
++            }
++
++            return 0;
++        }
++
++    }
++
++
+     //**************FUNCTIONS FOR SPARSE VECTORS
+     // Functions are implemented as classes to accept a hidden parameter scoreScript that contains some index settings.
+     // Also, constructors for some functions accept queryVector to calculate and cache queryVectorMagnitude only once
+@@ -264,7 +848,7 @@
+ 
+     // Calculate l1 norm (Manhattan distance) between a query's sparse vector and documents' sparse vectors
+     public static final class L1NormSparse extends SparseVectorFunction {
+-        public L1NormSparse(ScoreScript scoreScript,Map<String, Number> queryVector, Object docVector) {
++        public L1NormSparse(ScoreScript scoreScript, Map<String, Number> queryVector, Object docVector) {
+             super(scoreScript, queryVector, docVector);
+         }
+ 
+@@ -304,7 +888,7 @@
+     // Calculate l2 norm (Euclidean distance) between a query's sparse vector and documents' sparse vectors
+     public static final class L2NormSparse extends SparseVectorFunction {
+         public L2NormSparse(ScoreScript scoreScript, Map<String, Number> queryVector, Object docVector) {
+-           super(scoreScript, queryVector, docVector);
++            super(scoreScript, queryVector, docVector);
+         }
+ 
+         public double l2normSparse() {
+@@ -336,7 +920,7 @@
+                 queryIndex++;
+             }
+             while (docIndex < docDims.length) {
+-                l2norm += docValues[docIndex]* docValues[docIndex]; // 0 for missing query dims
++                l2norm += docValues[docIndex] * docValues[docIndex]; // 0 for missing query dims
+                 docIndex++;
+             }
+             return Math.sqrt(l2norm);
+@@ -346,7 +930,7 @@
+     // Calculate a dot product between a query's sparse vector and documents' sparse vectors
+     public static final class DotProductSparse extends SparseVectorFunction {
+         public DotProductSparse(ScoreScript scoreScript, Map<String, Number> queryVector, Object docVector) {
+-           super(scoreScript, queryVector, docVector);
++            super(scoreScript, queryVector, docVector);
+         }
+ 
+         public double dotProductSparse() {
+@@ -365,8 +949,8 @@
+         public CosineSimilaritySparse(ScoreScript scoreScript, Map<String, Number> queryVector, Object docVector) {
+             super(scoreScript, queryVector, docVector);
+             double dotProduct = 0;
+-            for (int i = 0; i< queryDims.length; i++) {
+-                dotProduct +=  queryValues[i] *  queryValues[i];
++            for (int i = 0; i < queryDims.length; i++) {
++                dotProduct += queryValues[i] * queryValues[i];
+             }
+             this.queryVectorMagnitude = Math.sqrt(dotProduct);
+         }
+Index: x-pack/plugin/vectors/src/main/resources/org/elasticsearch/xpack/vectors/query/whitelist.txt
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/x-pack/plugin/vectors/src/main/resources/org/elasticsearch/xpack/vectors/query/whitelist.txt b/x-pack/plugin/vectors/src/main/resources/org/elasticsearch/xpack/vectors/query/whitelist.txt
+--- a/x-pack/plugin/vectors/src/main/resources/org/elasticsearch/xpack/vectors/query/whitelist.txt	(revision 9c2c238baac2303c22632e0a9327a042ef0e9a82)
++++ b/x-pack/plugin/vectors/src/main/resources/org/elasticsearch/xpack/vectors/query/whitelist.txt	(revision 8891713fd9e7a910aec68fd7f43e2492b4aacba5)
+@@ -16,9 +16,12 @@
+     double l1norm(org.elasticsearch.script.ScoreScript, List, Object) bound_to org.elasticsearch.xpack.vectors.query.ScoreScriptUtils$L1Norm
+     double l2norm(org.elasticsearch.script.ScoreScript, List, Object) bound_to org.elasticsearch.xpack.vectors.query.ScoreScriptUtils$L2Norm
+     double cosineSimilarity(org.elasticsearch.script.ScoreScript, List, Object) bound_to org.elasticsearch.xpack.vectors.query.ScoreScriptUtils$CosineSimilarity
++    double jaccardDistance(org.elasticsearch.script.ScoreScript, List, Object) bound_to org.elasticsearch.xpack.vectors.query.ScoreScriptUtils$JaccardDistance
++    double jaccardDistance2(org.elasticsearch.script.ScoreScript, List, Object) bound_to org.elasticsearch.xpack.vectors.query.ScoreScriptUtils$JaccardDistance2
++    double customDistance(org.elasticsearch.script.ScoreScript, List, Object, String) bound_to org.elasticsearch.xpack.vectors.query.ScoreScriptUtils$CustomDistance
+     double dotProduct(org.elasticsearch.script.ScoreScript, List, Object) bound_to org.elasticsearch.xpack.vectors.query.ScoreScriptUtils$DotProduct
+     double l1normSparse(org.elasticsearch.script.ScoreScript, Map, Object) bound_to org.elasticsearch.xpack.vectors.query.ScoreScriptUtils$L1NormSparse
+     double l2normSparse(org.elasticsearch.script.ScoreScript, Map, Object) bound_to org.elasticsearch.xpack.vectors.query.ScoreScriptUtils$L2NormSparse
+     double dotProductSparse(org.elasticsearch.script.ScoreScript, Map, Object) bound_to org.elasticsearch.xpack.vectors.query.ScoreScriptUtils$DotProductSparse
+     double cosineSimilaritySparse(org.elasticsearch.script.ScoreScript, Map, Object) bound_to org.elasticsearch.xpack.vectors.query.ScoreScriptUtils$CosineSimilaritySparse
+-}
+\ No newline at end of file
++}
+Index: x-pack/plugin/vectors/src/test/java/org/elasticsearch/xpack/vectors/query/DenseVectorFunctionTests.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/x-pack/plugin/vectors/src/test/java/org/elasticsearch/xpack/vectors/query/DenseVectorFunctionTests.java b/x-pack/plugin/vectors/src/test/java/org/elasticsearch/xpack/vectors/query/DenseVectorFunctionTests.java
+--- a/x-pack/plugin/vectors/src/test/java/org/elasticsearch/xpack/vectors/query/DenseVectorFunctionTests.java	(revision 9c2c238baac2303c22632e0a9327a042ef0e9a82)
++++ b/x-pack/plugin/vectors/src/test/java/org/elasticsearch/xpack/vectors/query/DenseVectorFunctionTests.java	(revision 8891713fd9e7a910aec68fd7f43e2492b4aacba5)
+@@ -11,6 +11,7 @@
+ import org.elasticsearch.script.ScoreScript;
+ import org.elasticsearch.test.ESTestCase;
+ import org.elasticsearch.xpack.vectors.query.ScoreScriptUtils.CosineSimilarity;
++import org.elasticsearch.xpack.vectors.query.ScoreScriptUtils.JaccardDistance;
+ import org.elasticsearch.xpack.vectors.query.ScoreScriptUtils.DotProduct;
+ import org.elasticsearch.xpack.vectors.query.ScoreScriptUtils.L1Norm;
+ import org.elasticsearch.xpack.vectors.query.ScoreScriptUtils.L2Norm;
+@@ -32,13 +33,27 @@
+     private List<Number> queryVector;
+     private List<Number> invalidQueryVector;
+ 
++    private String fieldJaccard;
++    private float[] docVectorJaccard;
++    private List<Number> queryVectorJaccard;
++    private List<Number> invalidQueryVectorJaccard;
++    private List<Number> invalidQueryVectorJaccard2;
++
+     @Before
+     public void setUpVectors() {
+         field = "vector";
+         docVector = new float[] {230.0f, 300.33f, -34.8988f, 15.555f, -200.0f};
+         queryVector = Arrays.asList(0.5f, 111.3f, -13.0f, 14.8f, -156.0f);
+         invalidQueryVector = Arrays.asList(0.5, 111.3);
++
++        fieldJaccard = "vectorj";
++        docVectorJaccard = new float[] {230.0f, 300.33f, 34.8988f, 15.555f, 200.0f};
++        queryVectorJaccard = Arrays.asList(0.5f, 111.3f, 13.0f, 14.8f, 156.0f);
++
++        invalidQueryVectorJaccard = Arrays.asList(0.5, 111.3);
++        invalidQueryVectorJaccard2 = Arrays.asList(0.5f, 111.3f, -13.0f, 14.8f, 156.0f);
+     }
++
+ 
+     public void testDenseVectorFunctions() {
+         for (Version indexVersion : Arrays.asList(Version.V_7_4_0, Version.CURRENT)) {
+@@ -49,14 +64,23 @@
+             ScoreScript scoreScript = mock(ScoreScript.class);
+             when(scoreScript._getIndexVersion()).thenReturn(indexVersion);
+             when(scoreScript.getDoc()).thenReturn(Collections.singletonMap(field, docValues));
+-            
++
++            BytesRef encodedDocVectorJaccard = mockEncodeDenseVector(docVectorJaccard, indexVersion);
++            DenseVectorScriptDocValues docValuesJaccard = mock(DenseVectorScriptDocValues.class);
++            when(docValuesJaccard.getEncodedValue()).thenReturn(encodedDocVectorJaccard);
++
++            ScoreScript scoreScriptJaccard = mock(ScoreScript.class);
++            when(scoreScriptJaccard._getIndexVersion()).thenReturn(indexVersion);
++            when(scoreScriptJaccard.getDoc()).thenReturn(Collections.singletonMap(fieldJaccard, docValuesJaccard));
++
+             testDotProduct(docValues, scoreScript);
+             testCosineSimilarity(docValues, scoreScript);
++            testJaccardDistance(scoreScriptJaccard);
+             testL1Norm(docValues, scoreScript);
+             testL2Norm(docValues, scoreScript);
+         }
+     }
+-    
++
+     private void testDotProduct(DenseVectorScriptDocValues docValues, ScoreScript scoreScript) {
+         DotProduct function = new DotProduct(scoreScript, queryVector, field);
+         double result = function.dotProduct();
+@@ -71,7 +95,7 @@
+         IllegalArgumentException e = expectThrows(IllegalArgumentException.class, invalidFunction::dotProduct);
+         assertThat(e.getMessage(), containsString("query vector has a different number of dimensions [2] than the document vectors [5]"));
+     }
+-    
++
+     private void testCosineSimilarity(DenseVectorScriptDocValues docValues, ScoreScript scoreScript) {
+         CosineSimilarity function = new CosineSimilarity(scoreScript, queryVector, field);
+         double result = function.cosineSimilarity();
+@@ -87,6 +111,22 @@
+         assertThat(e.getMessage(), containsString("query vector has a different number of dimensions [2] than the document vectors [5]"));
+     }
+ 
++    private void testJaccardDistance(ScoreScript scoreScript) {
++
++        JaccardDistance function = new JaccardDistance(scoreScript, queryVectorJaccard, fieldJaccard);
++        double result = function.jaccardDistance();
++        assertEquals("jaccardDistance result is not equal to the expected value!", 0.382, result, 0.001);
++
++
++        JaccardDistance invalidFunction = new JaccardDistance(scoreScript, invalidQueryVectorJaccard, fieldJaccard);
++        IllegalArgumentException e = expectThrows(IllegalArgumentException.class, invalidFunction::jaccardDistance);
++        assertThat(e.getMessage(), containsString("query vector has a different number of dimensions [2] than the document vectors [5]"));
++
++//        JaccardDistance invalidFunction2 = new JaccardDistance(scoreScript, invalidQueryVectorJaccard2, fieldJaccard);
++//        IllegalArgumentException e2 = expectThrows(IllegalArgumentException.class, invalidFunction2::jaccardDistance);
++//        assertThat(e2.getMessage(), containsString("query vector has negative elements"));
++    }
++
+     private void testL1Norm(DenseVectorScriptDocValues docValues, ScoreScript scoreScript) {
+         L1Norm function = new L1Norm(scoreScript, queryVector, field);
+         double result = function.l1norm();
