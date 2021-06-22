@@ -1,3 +1,17 @@
+# Paper
+
+## Using Document Embeddings for Background Linking of News Articles
+
+Authors:
+
+* Pavel Khloponin
+* Leila Kosseim
+
+https://link.springer.com/chapter/10.1007/978-3-030-80599-9_28
+
+# Experiments data
+https://docs.google.com/spreadsheets/d/1FIzv_2mvf47vfznNzeZqszYD4CNV4uGorAbC4rQ2ACA/edit?usp=sharing
+
 # Initial Installation
 
 ```pip install -r requirements.txt```\
